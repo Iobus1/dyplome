@@ -10,15 +10,13 @@ def scrape_wikipedia():
     if response.status_code == 200:
         soup = BeautifulSoup(response.text, 'html.parser')
 
-        # Ищем в статье текст, который может быть полезен для базы знаний
         paragraphs = soup.find_all('p')  # Все абзацы
 
         for para in paragraphs:
             text = para.get_text(strip=True)
-            # Пропускаем пустые абзацы
             if text:
-                save_to_db("Что такое искусственный интеллект?", text)  # Сохраняем текст
-                print(f"Добавлен абзац: {text[:100]}...")  # Выводим начало текста для проверки
+                save_to_db("Что такое искусственный интеллект?", text)  
+                print(f"Добавлен абзац: {text[:100]}...")  
     else:
         print(f"Не удалось получить данные с Википедии, статус код: {response.status_code}")
 

@@ -1,11 +1,21 @@
 import sqlite3
 
+FREQUENT_QUESTIONS = {
+    "дискриминант": (
+        "Дискриминант квадратного уравнения — это выражение D = b² - 4ac, "
+        "которое помогает определить количество корней уравнения ax² + bx + c = 0.\n\n"
+        "Если D > 0, уравнение имеет два различных действительных корня;\n"
+        "если D = 0, один корень;\n"
+        "если D < 0, корней нет (комплексные корни)."
+    ),
+}
+
 def init_db():
     """Инициализация базы данных и добавление стандартных вопросов и ответов"""
     conn = sqlite3.connect('knowledge_base.db')
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS knowledge_base
-                 (question TEXT, answer TEXT)''')
+                 (question TEXT UNIQUE, answer TEXT)''')
 
     # Добавление популярных вопросов и ответов в базу данных
     questions_and_answers = [
@@ -19,20 +29,20 @@ def init_db():
         ("Что такое искусственный интеллект?", "Искусственный интеллект — это способность машин имитировать человеческие способности, такие как восприятие, мышление и принятие решений."),
     ]
     
-    # Вставляем данные в таблицу
+    # Вставляем данные в таблицу с игнорированием повторов
     c.executemany("INSERT OR IGNORE INTO knowledge_base (question, answer) VALUES (?, ?)", questions_and_answers)
 
     conn.commit()
     conn.close()
     print("✅ База данных инициализирована и заполнена вопросами.")
 
+
 def save_to_db(question, answer):
     """Сохранение данных в базу"""
     try:
         conn = sqlite3.connect('knowledge_base.db')
         c = conn.cursor()
-        c.execute("INSERT INTO knowledge_base (question, answer) VALUES (?, ?)", 
-                  (question, answer))
+        c.execute("INSERT INTO knowledge_base (question, answer) VALUES (?, ?)", (question, answer))
         conn.commit()
         print("💾 Данные сохранены в базу.")
     except Exception as e:
@@ -40,12 +50,12 @@ def save_to_db(question, answer):
     finally:
         conn.close()
 
+
 def search_knowledge_base(query):
     """Поиск ответа в базе данных по вопросу"""
     conn = sqlite3.connect('knowledge_base.db')
     c = conn.cursor()
-    c.execute("SELECT answer FROM knowledge_base WHERE LOWER(question) LIKE LOWER(?)", 
-              ('%' + query + '%',))
+    c.execute("SELECT answer FROM knowledge_base WHERE LOWER(question) LIKE LOWER(?)", ('%' + query + '%',))
     result = c.fetchone()
     conn.close()
     if result:
