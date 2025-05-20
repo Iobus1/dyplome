@@ -1,5 +1,4 @@
 import os
-import asyncio
 import aiohttp
 from dotenv import load_dotenv
 from telegram import Update, ReplyKeyboardMarkup
@@ -8,151 +7,216 @@ from telegram.ext import (
     CommandHandler,
     MessageHandler,
     ContextTypes,
-    filters
+    filters,
 )
-from database import init_db, search_knowledge_base, save_to_db, FREQUENT_QUESTIONS
-
+from database import (
+    init_db,
+    search_knowledge_base,
+    save_to_db,
+    FREQUENT_QUESTIONS,
+)
 
 load_dotenv("keys.env")
+
 BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-GOOGLE_CX_ID = os.getenv("GOOGLE_CX_ID")
+HF_TOKEN = os.getenv("HUGGINGFACE_TOKEN")
 
 if not BOT_TOKEN:
-    raise ValueError("❌ Токен бота не найден!")
+    raise ValueError("❌ Переменная TELEGRAM_TOKEN не найдена в keys.env")
+if not HF_TOKEN:
+    raise ValueError("❌ Переменная HUGGINGFACE_TOKEN не найдена в keys.env")
 
-if not GOOGLE_API_KEY or not GOOGLE_CX_ID:
-    raise ValueError("❌ Google API ключ или CX ID не найден в keys.env!")
-
-init_db()
+HF_MODEL_URL = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.3"
+HF_HEADERS = {
+    "Authorization": f"Bearer {HF_TOKEN}",
+    "Content-Type": "application/json",
+}
 
 LEARNING_COMMANDS = [
     ["📚 Найти материал", "🧠 Запомнить"],
-    ["🔍 Повторить", "❓ Помощь"]
+    ["🔍 Повторить", "❓ Помощь"],
+    ["⬅️ В меню"],
 ]
 
+# Шаблонные ответы
+TEMPLATES = {
+    "привет": "Привет! Чем могу помочь?",
+    "здравствуй": "Здравствуйте! Чем могу помочь?",
+    "добрый день": "Добрый день! Какой у вас вопрос?",
+    "да": "Отлично!",
+    "нет": "Понятно.",
+    "пока": "До скорого! Хорошего дня!",
+    "спасибо": "Пожалуйста!",
+    "приветствую": "Приветствую!",
+    "как дела": "У меня всё хорошо, спасибо! Чем могу помочь?",
+}
 
-async def get_educational_info(query: str) -> str:
-    """Поиск обучающей информации на проверенных сайтах"""
-    allowed_sites = [
-        "khanacademy.org", "wikipedia.org", "britannica.com",
-        "coursera.org", "edx.org", "nauka.ru",
-        "edu.ru", "habr.com", "sparknotes.com"
-    ]
-    site_filter = " OR ".join([f"site:{site}" for site in allowed_sites])
-    full_query = f"{query} {site_filter}"
+HELP_TEXT = (
+    "🆘 <b>Помощь по боту</b>:\n\n"
+    "📚 Нажмите <b>«Найти материал»</b>, чтобы задать тему и получить информацию.\n"
+    "🧠 После ответа ИИ можно сохранить информацию в вашу базу знаний кнопкой <b>«Запомнить»</b>.\n"
+    "🔍 <b>Повторить</b> — повторить последний сохранённый материал.\n"
+    "❓ <b>Помощь</b> — показать это сообщение.\n"
+    "⬅️ <b>В меню</b> — вернуться в главное меню.\n\n"
+    "Если хотите задать вопрос — просто напишите его."
+)
 
-    url = f"https://www.googleapis.com/customsearch/v1?q={full_query}&key={GOOGLE_API_KEY}&cx={GOOGLE_CX_ID}"
+async def query_llm(prompt: str, max_tokens: int = 150) -> str:
+    """Отправляет запрос к модели Mistral-7B-Instruct на Hugging Face."""
+    payload = {
+        "inputs": prompt,
+        "parameters": {
+            "temperature": 0.5,
+            "max_new_tokens": max_tokens,
+            "return_full_text": False,
+        },
+    }
 
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url) as response:
-                if response.status != 200:
-                    return "❌ Не удалось получить данные."
-                data = await response.json()
-                for item in data.get("items", []):
-                    title = item.get("title")
-                    snippet = item.get("snippet")
-                    link = item.get("link")
-                    if title and snippet and link:
-                        return f"<b>{title}</b>\n\n{snippet}\n\n🔗 {link}"
-                return "❌ Не найдено подходящей обучающей информации."
+            async with session.post(
+                HF_MODEL_URL, headers=HF_HEADERS, json=payload, timeout=90
+            ) as resp:
+                if resp.status != 200:
+                    error_text = await resp.text()
+                    return f"⚠️ Ошибка Hugging Face API: {error_text}"
+
+                data = await resp.json()
+                return data[0]["generated_text"].strip()
     except Exception as e:
-        print(f"Ошибка: {e}")
-        return "⚠️ Ошибка при запросе данных."
+        return f"⚠️ Ошибка при обращении к LLM: {e}"
 
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /start — приветствие и меню."""
     await update.message.reply_text(
-        "🤖 <b>Учебный помощник 2025</b>\n\n"
-        "Я помогу найти и сохранить обучающую информацию по различным темам.\n"
-        "Примеры запросов:\n"
-        "- Что такое машинное обучение?\n"
-        "- Как работает нейросеть?\n"
-        "- Теорема Пифагора\n\n"
-        "Вы можете начать, написав свой вопрос или выбрав команду ниже.",
-        parse_mode='HTML',
-        reply_markup=ReplyKeyboardMarkup(LEARNING_COMMANDS, resize_keyboard=True)
+        "<b>🤖 Учебный помощник 2025</b>\n\n"
+        "Задайте мне вопрос по учебной теме, или выберите действие из меню.",
+        parse_mode="HTML",
+        reply_markup=ReplyKeyboardMarkup(LEARNING_COMMANDS, resize_keyboard=True),
     )
+    context.user_data.clear()
 
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (update.message.text or "").strip()
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.message.text.strip().lower()
+    # Обработка кнопки "В меню"
+    if text == "⬅️ В меню":
+        await cmd_start(update, context)
+        return
 
-    # Проверка часто задаваемых вопросов из FREQUENT_QUESTIONS
-    for key in FREQUENT_QUESTIONS:
-        if key in query:
+    # Обработка кнопки "Помощь"
+    if text == "❓ Помощь":
+        await update.message.reply_text(HELP_TEXT, parse_mode="HTML")
+        return
+
+    # Если ожидаем тему для поиска материала
+    if context.user_data.get("awaiting_topic"):
+        context.user_data.pop("awaiting_topic")
+        topic = text
+
+        # Поиск в локальной базе
+        local_answer = search_knowledge_base(topic)
+        if local_answer:
             await update.message.reply_text(
-                f"📘 <b>Ответ из базы знаний:</b>\n\n{FREQUENT_QUESTIONS[key]}",
-                parse_mode='HTML'
+                f"📘 <b>Ответ из базы знаний:</b>\n\n{local_answer}", parse_mode="HTML"
+            )
+            context.user_data["last_response"] = (topic, local_answer)
+            return
+
+        await update.message.reply_text("⌛ Пожалуйста, подождите, я ищу ответ...")
+
+        # Формируем чёткий запрос к модели
+        llm_prompt = f"Поясни простыми словами разделы математики и их применение на практике по теме: \"{topic}\"."
+
+        llm_answer = await query_llm(llm_prompt)
+
+        # Очищаем начало ответа от лишних символов
+        llm_answer = llm_answer.lstrip(",. \n")
+
+        await update.message.reply_text(
+            f"🧠 <b>Ответ ИИ:</b>\n\n{llm_answer}",
+            parse_mode="HTML",
+            reply_markup=ReplyKeyboardMarkup(
+                [["🧠 Запомнить", "⬅️ В меню"]], resize_keyboard=True, one_time_keyboard=True
+            ),
+        )
+        context.user_data["last_response"] = (topic, llm_answer)
+        return
+
+    # Обработка шаблонных ответов
+    if text.lower() in TEMPLATES:
+        await update.message.reply_text(TEMPLATES[text.lower()])
+        return
+
+    # Обработка частых вопросов из базы
+    for key, answer in FREQUENT_QUESTIONS.items():
+        if key in text.lower():
+            await update.message.reply_text(
+                f"📘 <b>Ответ из базы знаний:</b>\n\n{answer}", parse_mode="HTML"
             )
             return
 
-    if not query:
+    # Обработка кнопки "Найти материал" — переходим к вопросу о теме
+    if text == "📚 Найти материал":
+        context.user_data["awaiting_topic"] = True
+        await update.message.reply_text("Введите тему для поиска материала:")
+        return
+
+    # Если пустой или непонятный текст
+    if not text:
         await update.message.reply_text(
-            "⚠️ Пожалуйста, введите обучающий вопрос — я не могу обработать пустой запрос.\n\n"
-            "Например, вы можете спросить меня о самых разных вещах, связанных с наукой, технологиями, историей, математикой и многим другим. "
-            "Вот несколько примеров вопросов, которые помогут вам начать:\n"
-            "• Что такое искусственный интеллект и как он работает?\n"
-            "• Как устроена нейронная сеть и где она применяется?\n"
-            "• Какие основные теоремы в геометрии стоит знать?\n"
-            "• Объясните принцип работы блокчейн-технологий.\n\n"
-            "Я постараюсь найти наиболее точную и полезную информацию по вашему запросу. "
-            "Если в моей локальной базе данных нет ответа, я выполню поиск по надежным внешним источникам и предоставлю подробный и развернутый ответ, "
-            "который поможет вам лучше понять интересующую тему. Пожалуйста, задавайте вопросы максимально конкретно и понятно."
+            "⚠️ Я не увидел вопроса. Попробуйте сформулировать запрос конкретнее."
         )
         return
 
     # Поиск в локальной базе
-    answer_from_db = search_knowledge_base(query)
-    if answer_from_db and not answer_from_db.lower().startswith("извините"):
+    local_answer = search_knowledge_base(text)
+    if local_answer:
         await update.message.reply_text(
-            f"📘 <b>Ответ из базы знаний:</b>\n\n{answer_from_db}\n\n"
-            "Если вы хотите получить более подробную информацию или расширить тему, пожалуйста, уточните свой вопрос, и я постараюсь помочь вам еще лучше.",
-            parse_mode='HTML'
+            f"📘 <b>Ответ из базы знаний:</b>\n\n{local_answer}", parse_mode="HTML"
         )
         return
 
-    # Запрос к Google Custom Search для получения информации
-    try:
-        result = await get_educational_info(query)
-        await update.message.reply_text(
-            f"🌐 <b>Информация из внешних источников:</b>\n\n{result}\n\n"
-            "Если вы хотите сохранить эту информацию в свою базу знаний для быстрого доступа в будущем, просто нажмите кнопку «🧠 Запомнить».",
-            parse_mode='HTML',
-            reply_markup=ReplyKeyboardMarkup([["🧠 Запомнить"]], one_time_keyboard=True)
-        )
-        context.user_data['last_response'] = (query, result)
-    except Exception as e:
-        print(f"❌ Ошибка получения информации: {e}")
-        await update.message.reply_text(
-            "⚠️ Произошла ошибка при попытке получить информацию из интернета. Попробуйте повторить запрос позднее или переформулируйте вопрос.",
-            parse_mode='HTML'
-        )
+    # Сообщаем о начале поиска
+    await update.message.reply_text("⌛ Пожалуйста, подождите, я ищу ответ...")
 
+    llm_prompt = f"Поясни понятным языком для студента: {text}"
+
+    llm_answer = await query_llm(llm_prompt)
+    llm_answer = llm_answer.lstrip(",. \n")
+
+    await update.message.reply_text(
+        f"🧠 <b>Ответ ИИ:</b>\n\n{llm_answer}",
+        parse_mode="HTML",
+        reply_markup=ReplyKeyboardMarkup(
+            [["🧠 Запомнить", "⬅️ В меню"]], resize_keyboard=True, one_time_keyboard=True
+        ),
+    )
+    context.user_data["last_response"] = (text, llm_answer)
 
 async def save_response(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if 'last_response' not in context.user_data:
-        await update.message.reply_text("❌ Нечего сохранять.")
+    if "last_response" not in context.user_data:
+        await update.message.reply_text("❌ Нет информации для сохранения.")
         return
 
-    question, answer = context.user_data['last_response']
+    question, answer = context.user_data["last_response"]
     try:
         save_to_db(question, answer)
-        await update.message.reply_text("✅ Информация сохранена в базе знаний!")
+        await update.message.reply_text("✅ Сохранено в базе знаний!",
+                                        reply_markup=ReplyKeyboardMarkup(LEARNING_COMMANDS, resize_keyboard=True))
     except Exception as e:
-        await update.message.reply_text(f"⚠️ Ошибка сохранения: {e}")
+        await update.message.reply_text(f"⚠️ Не удалось сохранить: {e}")
 
+def main() -> None:
+    init_db()
 
-def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(MessageHandler(filters.Regex("^🧠 Запомнить$"), save_response))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    print("✅ Обучающий чат-бот запущен.")
+    print("✅ Учебный бот запущен. Ожидаем сообщения...")
     app.run_polling()
 
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
